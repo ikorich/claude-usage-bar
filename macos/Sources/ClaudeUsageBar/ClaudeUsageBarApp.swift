@@ -23,7 +23,6 @@ struct ClaudeUsageBarApp: App {
                 service: service,
                 historyService: historyService,
                 notificationService: notificationService,
-                appUpdater: appUpdater,
                 statusMonitor: statusMonitor
             )
         } label: {

@@ -16,10 +16,7 @@ jobs:
     env:
       REPOSITORY_NAME: ${{ github.event.repository.name }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Build release app bundle
         run: |
@@ -40,7 +37,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p dist/archives dist/site
+          mkdir -p dist/archives
 
           gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             --method POST \
@@ -77,14 +74,6 @@ jobs:
               fh.write(html)
           PY
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            macos/ClaudeUsageBar.zip
-            macos/ClaudeUsageBar.dmg
-          body_path: dist/release-notes.md
-
       - name: Generate Sparkle appcast
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -102,23 +91,24 @@ jobs:
               --ed-key-file - \
               --download-url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/" \
               --maximum-deltas 0 \
-              -o dist/site/appcast.xml
+              -o dist/appcast.xml
 
-      - name: Upload appcast for GitHub Pages
-        uses: actions/upload-pages-artifact@v4
+      # The appcast is attached to the release so pages.yml can publish it again whenever the website changes.
+      - name: Create release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          path: dist/site
+          files: |
+            macos/ClaudeUsageBar.zip
+            macos/ClaudeUsageBar.dmg
+            dist/appcast.xml
+          body_path: dist/release-notes.md
 
-  deploy_appcast:
+  pages:
     needs: release
-    runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy appcast
-        id: deployment
-        uses: actions/deploy-pages@v4
+    uses: ./.github/workflows/pages.yml
+    with:
+      tag: ${{ github.ref_name }}

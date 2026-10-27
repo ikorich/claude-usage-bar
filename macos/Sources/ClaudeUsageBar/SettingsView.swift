@@ -101,12 +101,15 @@ struct SettingsWindowContent: View {
 
             Section("Updates") {
                 LabeledContent("Version") {
-                    Text(Self.appVersion)
+                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
                         .textSelection(.enabled)
                 }
 
                 if appUpdater.isConfigured {
-                    Toggle("Check daily for updates", isOn: $appUpdater.automaticallyChecksForUpdates)
+                    Toggle("Check daily for updates", isOn: Binding(
+                        get: { appUpdater.automaticallyChecksForUpdates },
+                        set: { appUpdater.setAutomaticallyChecksForUpdates($0) }
+                    ))
 
                     Button("Check for Updates…") {
                         appUpdater.checkForUpdates()
@@ -134,26 +137,14 @@ struct SettingsWindowContent: View {
     }
 }
 
-extension SettingsWindowContent {
-    static var appVersion: String {
-        displayVersion(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
-    }
-
-    /// `CFBundleVersion` is derived from the version string by build.sh
-    /// (0.0.10 -> 10), so appending it would only restate the number beside it.
-    /// The marketing version stands alone.
-    static func displayVersion(_ shortVersion: String?) -> String {
-        let trimmed = shortVersion?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let trimmed, !trimmed.isEmpty else { return "unknown" }
-        return trimmed
-    }
-}
-
+/// SwiftUI orders Settings front only within this app, and a menu bar app isn't
+/// frontmost, so an already-open Settings window would stay behind other apps.
 @MainActor
-private func focusSettingsWindow() {
+func focusSettingsWindow() {
     DispatchQueue.main.async {
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.last(where: { $0.isVisible && $0.canBecomeKey }) {
+        // Settings is the only titled window; the popover and status item aren't.
+        if let window = NSApp.windows.first(where: { $0.isVisible && $0.styleMask.contains(.titled) }) {
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
         }
@@ -162,21 +153,15 @@ private func focusSettingsWindow() {
 
 struct LaunchAtLoginToggle: View {
     @StateObject private var model: LaunchAtLoginModel
-    /// nil means "inherit whatever the container provides". Forcing a size here
-    /// made this switch a different size from every other control in the
-    /// Settings form, which sets the ambient size for its section.
-    private let controlSize: ControlSize?
     private let useSwitchStyle: Bool
 
     init(
-        controlSize: ControlSize? = nil,
         useSwitchStyle: Bool = false,
         bundleURL: URL = Bundle.main.bundleURL
     ) {
         _model = StateObject(
             wrappedValue: LaunchAtLoginModel(bundleURL: bundleURL)
         )
-        self.controlSize = controlSize
         self.useSwitchStyle = useSwitchStyle
     }
 
@@ -200,26 +185,10 @@ struct LaunchAtLoginToggle: View {
         ))
         .disabled(!model.isSupported)
 
-        let sized = baseToggle.modifier(OptionalControlSize(controlSize: controlSize))
-
         if useSwitchStyle {
-            sized.toggleStyle(.switch)
+            baseToggle.toggleStyle(.switch)
         } else {
-            sized
-        }
-    }
-}
-
-/// Applies `.controlSize` only when one was requested, so the default is to
-/// inherit the container's.
-private struct OptionalControlSize: ViewModifier {
-    let controlSize: ControlSize?
-
-    func body(content: Content) -> some View {
-        if let controlSize {
-            content.controlSize(controlSize)
-        } else {
-            content
+            baseToggle
         }
     }
 }

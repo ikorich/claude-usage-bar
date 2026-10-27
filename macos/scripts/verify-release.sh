@@ -41,14 +41,11 @@ verify_app_bundle() {
 
     verify_build_target "$app_bundle/Contents/MacOS/$APP_NAME"
 
-    # Notifications are gated on this key at runtime (see
-    # supportsUserNotifications). Nothing else asserts it, and losing it fails
-    # silently: every user simply stops getting notifications.
+    # supportsUserNotifications() requires APPL; losing it silently disables notifications.
     echo "==> Verifying bundle package type..."
     package_type="$(plutil -extract CFBundlePackageType raw "$app_plist" 2>/dev/null || true)"
     if [[ "$package_type" != "APPL" ]]; then
-        echo "Error: CFBundlePackageType is '${package_type:-<missing>}', expected APPL."
-        echo "       Notifications are disabled at runtime without it."
+        echo "Error: CFBundlePackageType is '${package_type:-<missing>}', expected APPL (notifications need it)."
         exit 1
     fi
 
@@ -76,21 +73,18 @@ verify_build_target() {
 
     [[ -n "$sdks" && -n "$minoses" ]] || { echo "Error: could not read LC_BUILD_VERSION from $binary"; exit 1; }
 
-    # macOS 26 grants an app the current appearance only if it was linked
-    # against the macOS 26 SDK or newer — there is an Info.plist key to opt out
-    # but none to opt in. An older SDK silently falls back to legacy chrome
-    # (square popover corners), with no build error to catch it.
+    # macOS 26 only gives an app its current appearance when linked against the 26 SDK;
+    # an older SDK silently falls back to legacy chrome (square popover corners).
     local sdk
     while read -r sdk; do
         if [[ "${sdk%%.*}" -lt "$min_sdk_major" ]]; then
-            echo "Error: linked against SDK $sdk, need $min_sdk_major or newer."
-            echo "       The runner image is probably too old — check 'runs-on' in .github/workflows/."
+            echo "Error: linked against SDK $sdk, need $min_sdk_major or newer (Xcode $min_sdk_major+)."
+            echo "       On CI, check 'runs-on' in .github/workflows/. Locally, MIN_SDK_MAJOR=${sdk%%.*} skips this for a test build."
             exit 1
         fi
     done <<< "$sdks"
 
-    # The other direction: a newer toolchain must not silently raise the
-    # deployment target and strand users on older macOS.
+    # A newer toolchain must not silently raise the deployment target.
     local minos
     while read -r minos; do
         if [[ "$minos" != "$expected_minos" ]]; then

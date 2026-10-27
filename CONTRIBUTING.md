@@ -5,7 +5,7 @@ Thanks for your interest in contributing! This guide will help you get set up an
 ## Prerequisites
 
 - macOS 14 (Sonoma) or later
-- Xcode 15+ / Swift 5.9+
+- Xcode 15+ / Swift 5.9+ (Xcode 26+ for `make zip` / `make dmg`, whose release check requires the macOS 26 SDK)
 - Python 3 (for the mock server, included with macOS)
 
 ## Getting started
@@ -14,32 +14,20 @@ Thanks for your interest in contributing! This guide will help you get set up an
 git clone https://github.com/Blimp-Labs/claude-usage-bar.git
 cd claude-usage-bar
 make app
+open macos/ClaudeUsageBar.app
 ```
 
-This builds the release binary via Swift Package Manager, bundles it as a `.app`, and codesigns it. The app also embeds Sparkle for update checks.
+`make app` builds the release binary with Swift Package Manager, bundles it as a `.app` with Sparkle embedded, and ad-hoc codesigns it.
 
-## Project structure
+Local builds have no update feed, so their updater is off and Settings shows version 1.0.0. That's deliberate: it stops forks and dev builds from updating themselves to official releases.
 
+## Running tests
+
+```sh
+cd macos && swift test
 ```
-Sources/ClaudeUsageBar/
-├── ClaudeUsageBarApp.swift       # App entry point, menu bar setup
-├── UsageService.swift            # OAuth, polling, API calls
-├── UsageModel.swift              # API response types
-├── UsageHistoryModel.swift       # History data types, time ranges
-├── UsageHistoryService.swift     # Persistence, downsampling
-├── UsageChartView.swift          # Swift Charts trajectory view
-├── PopoverView.swift             # Main popover UI + reset indicator view
-├── MenuBarIconRenderer.swift     # Menu bar icon drawing + divider rendering
-├── SettingsView.swift            # Settings window + appearance toggles
-├── ResetIndicatorState.swift     # Enum for divider state + color mapping logic
-├── AppearanceSettings.swift      # UserDefaults keys for appearance settings
-├── NotificationService.swift     # Usage threshold notifications
-├── PollingOptionFormatter.swift  # Polling interval display labels
-├── AppUpdater.swift              # Sparkle update integration
-└── Resources/
-    ├── claude-logo.png           # Pre-rendered menu bar logo (512px)
-    └── en.lproj/Localizable.strings
-```
+
+CI runs the same tests, plus `make release-artifacts`, on every pull request.
 
 ## Build commands
 
@@ -54,31 +42,49 @@ Sources/ClaudeUsageBar/
 | `make install` | Build + install to `/Applications` |
 | `make clean` | Remove build artifacts |
 
-## Publishing releases
+## Project structure
 
-Releases are tag-driven. Pushing a `v*` tag triggers the GitHub Actions workflow that:
-
-- builds the release app bundle once
-- produces both a ZIP (for Sparkle) and a DMG (for manual drag-to-Applications installs)
-- verifies the packaged artifacts before publishing
-- uploads those exact artifacts to the GitHub Release
-- reuses GitHub-generated release notes for both the release body and the Sparkle update entry
-- generates a signed Sparkle appcast from that zip
-- deploys the appcast to GitHub Pages
-
-One-time repository setup:
-
-1. Enable GitHub Pages with source `GitHub Actions`
-2. Add the `SPARKLE_PRIVATE_KEY` repository secret
-
-Local source builds intentionally leave `SUFeedURL` unset, so Sparkle stays disabled unless your packaging flow injects a feed URL. This prevents forks and dev builds from auto-updating to upstream releases.
-
-To export the current private key from your local Keychain:
-
-```sh
-.build/artifacts/sparkle/Sparkle/bin/generate_keys --account claude-usage-bar -x /tmp/claude-usage-bar.sparkle.key
-gh secret set SPARKLE_PRIVATE_KEY < /tmp/claude-usage-bar.sparkle.key
 ```
+macos/                               # macOS menu bar app (Swift/SwiftUI)
+├── Sources/ClaudeUsageBar/
+│   ├── ClaudeUsageBarApp.swift      # App entry point, menu bar setup
+│   ├── UsageService.swift           # OAuth, polling, API calls
+│   ├── OAuthCallbackListener.swift  # Receives the browser's sign-in redirect
+│   ├── SignInPage.swift             # Page the browser shows after sign-in
+│   ├── StoredCredentials.swift      # Saved sign-in tokens
+│   ├── UsageModel.swift             # API response types
+│   ├── UsageHistoryModel.swift      # History data types, time ranges
+│   ├── UsageHistoryService.swift    # Persistence, downsampling
+│   ├── UsageChartView.swift         # Swift Charts trajectory view
+│   ├── PopoverView.swift            # Main popover UI
+│   ├── SettingsView.swift           # Settings window
+│   ├── NotificationService.swift    # Usage threshold notifications
+│   ├── MenuBarIconRenderer.swift    # Menu bar icon drawing
+│   ├── PollingOptionFormatter.swift # Polling interval display labels
+│   ├── AppUpdater.swift             # Sparkle update integration
+│   ├── AppResources.swift           # Locates the SwiftPM resource bundle
+│   └── Resources/
+│       ├── claude-logo.png          # Pre-rendered menu bar logo (512px)
+│       └── en.lproj/Localizable.strings
+├── Tests/ClaudeUsageBarTests/
+├── Resources/                       # App bundle resources (not SwiftPM)
+│   ├── Info.plist
+│   ├── Assets.xcassets/             # App icon
+│   ├── dmg/                         # Disk image background
+│   └── claude-logo.svg              # Source SVG for the menu bar logo
+├── scripts/
+│   ├── build.sh                     # Build, bundle, codesign, ZIP and DMG
+│   ├── verify-release.sh            # Checks a packaged ZIP or DMG
+│   └── generate-logo-png.swift      # Regenerates the logo PNG from the SVG
+└── Package.swift
+
+scripts/
+└── mock-server.py                   # Local mock API for development
+```
+
+## Releases
+
+The maintainer cuts releases from `main` by pushing a version tag. PRs don't need to bump the version or touch the release workflow.
 
 ## Testing with the mock server
 
@@ -136,51 +142,11 @@ Available scenarios:
 **The endpoint override is an environment variable, so there is nothing to revert
 — but do revert any Info.plist change before committing.**
 
-## Testing the service status indicator
-
-### Smoke test against live endpoint
-
-Enable the indicator in Settings → Service Status, then:
-
-1. Confirm the Claude logo is untinted when `https://status.claude.com` shows all systems operational.
-2. Check the popover "Service Status" section lists Claude API, claude.ai, and Claude Code.
-3. Click the section — `https://status.claude.com` must open in the default browser.
-4. Turn the feature off in Settings — confirm polling stops and the logo tint clears.
-
-### Injecting fixture JSON for local testing
-
-The unit tests under `macos/Tests/ClaudeUsageBarTests/Fixtures/` cover the five fixture scenarios. For manual end-to-end testing you can serve a fixture over localhost and redirect `StatusPageClient`:
-
-1. Serve a fixture file:
-   ```sh
-   python3 -m http.server 9090 --directory macos/Tests/ClaudeUsageBarTests/Fixtures
-   ```
-2. In `StatusPageClient.swift`, temporarily change `baseURL`:
-   ```swift
-   private let baseURL = URL(string: "http://127.0.0.1:9090")!
-   // fetch path: /statuspage_summary_partial_outage.json
-   ```
-3. Update the fetch path to match the fixture filename (e.g. `statuspage_summary_major_outage_with_incident.json`).
-4. Add `NSAllowsLocalNetworking` to `Resources/Info.plist` (same pattern as the mock server above).
-5. Rebuild — the menubar logo tint should reflect the fixture's severity.
-
-**Remember to revert all changes before committing.**
-
-Available fixture scenarios:
-
-| Fixture file | Expected logo tint |
-|---|---|
-| `statuspage_summary_all_operational.json` | None (untinted) |
-| `statuspage_summary_partial_outage.json` | Orange |
-| `statuspage_summary_major_outage_with_incident.json` | Red |
-| `statuspage_summary_under_maintenance.json` | None (maintenance = operational) |
-| `statuspage_summary_unknown_status_string.json` | None (unknown status falls back to operational) |
-
 ## Submitting changes
 
 1. Fork the repo and create a branch from `main`
 2. Keep PRs focused — one feature or fix per PR
-3. Test your changes with the mock server when relevant
+3. Run `cd macos && swift test`, and test with the mock server when relevant
 4. Make sure `make app` builds without errors
 5. Open a pull request against `main`
 

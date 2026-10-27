@@ -4,11 +4,11 @@ struct PopoverView: View {
     @ObservedObject var service: UsageService
     @ObservedObject var historyService: UsageHistoryService
     @ObservedObject var notificationService: NotificationService
-    @ObservedObject var appUpdater: AppUpdater
-    /// Optional so existing tests / call sites that don't care about service status keep compiling.
-    var statusMonitor: StatusMonitor?
     @AppStorage("setupComplete") private var setupComplete = false
     @AppStorage(AppearanceDefaultsKey.showServiceStatus) private var showServiceStatus = false
+    @Environment(\.openSettings) private var openSettings
+
+    var statusMonitor: StatusMonitor?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -34,7 +34,9 @@ struct PopoverView: View {
 
     @ViewBuilder
     private var signInView: some View {
-        if service.isAwaitingCode {
+        if service.isWaitingForBrowser {
+            BrowserSignInView(service: service)
+        } else if service.isAwaitingCode {
             CodeEntryView(service: service)
         } else {
             Text("Sign in to view your usage.")
@@ -42,7 +44,7 @@ struct PopoverView: View {
                 .foregroundStyle(.secondary)
 
             Button("Sign in with Claude") {
-                service.startOAuthFlow()
+                Task { await service.startOAuthFlow() }
             }
             .buttonStyle(.borderedProminent)
             .frame(maxWidth: .infinity)
@@ -99,13 +101,6 @@ struct PopoverView: View {
         if let error = service.lastError {
             Divider()
             Label(error, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.red)
-                .font(.caption)
-        }
-
-        if let updaterError = appUpdater.lastError {
-            Divider()
-            Label(updaterError, systemImage: "arrow.triangle.2.circlepath.circle")
                 .foregroundStyle(.red)
                 .font(.caption)
         }
@@ -172,8 +167,9 @@ struct PopoverView: View {
     }
 
     private var settingsButton: some View {
-        SettingsLink {
-            Text("Settings…")
+        Button("Settings…") {
+            openSettings()
+            focusSettingsWindow()
         }
         .buttonStyle(.borderless)
         .font(.caption)
@@ -196,7 +192,8 @@ private struct SetupView: View {
 
         Divider()
 
-        LaunchAtLoginToggle(controlSize: .small, useSwitchStyle: true)
+        LaunchAtLoginToggle(useSwitchStyle: true)
+            .controlSize(.small)
 
         Divider()
 
@@ -275,6 +272,28 @@ private struct SetupView: View {
 
 // MARK: - Subviews
 
+private struct BrowserSignInView: View {
+    @ObservedObject var service: UsageService
+
+    var body: some View {
+        Text("Approve access in your browser to finish signing in.")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+
+        HStack {
+            Button("Cancel") {
+                service.endOAuthFlow()
+            }
+            .buttonStyle(.borderless)
+            Spacer()
+            Button("Paste a code instead") {
+                service.switchToPastedCode()
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+}
+
 private struct CodeEntryView: View {
     @ObservedObject var service: UsageService
     @State private var code = ""
@@ -301,7 +320,7 @@ private struct CodeEntryView: View {
 
         HStack {
             Button("Cancel") {
-                service.isAwaitingCode = false
+                service.endOAuthFlow()
             }
             .buttonStyle(.borderless)
             Spacer()

@@ -1,18 +1,16 @@
 import Foundation
 import Sparkle
 
-/// Forwards Sparkle's delegate callbacks. A separate object because
-/// `SPUStandardUpdaterController` wants its delegate at construction, before
-/// `self` exists.
+/// Separate object: the controller needs its delegate before `self` exists.
 private final class UpdaterDelegate: NSObject, SPUUpdaterDelegate {
-    var onUpdateCycleFinished: ((Error?) -> Void)?
+    var onUpdateCycleFinished: ((SPUUpdateCheck, Error?) -> Void)?
 
     func updater(
         _ updater: SPUUpdater,
         didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
         error: (any Error)?
     ) {
-        onUpdateCycleFinished?(error)
+        onUpdateCycleFinished?(updateCheck, error)
     }
 }
 
@@ -21,25 +19,7 @@ final class AppUpdater: ObservableObject {
     @Published private(set) var canCheckForUpdates = false
     @Published private(set) var isConfigured: Bool
     @Published private(set) var lastError: String?
-
-    /// Sparkle enrols every user in a daily background check via
-    /// `SUEnableAutomaticChecks` without ever asking. This is the only place a
-    /// user can see that it happens, or turn it off.
-    @Published var automaticallyChecksForUpdates: Bool {
-        didSet {
-            guard isConfigured else { return }
-
-            // Only a completed cycle clears `lastError`, and switching this off
-            // stops cycles entirely — so a stale banner would freeze for the
-            // life of the process, describing machinery the user just disabled.
-            if !automaticallyChecksForUpdates {
-                lastError = nil
-            }
-
-            guard updaterController.updater.automaticallyChecksForUpdates != automaticallyChecksForUpdates else { return }
-            updaterController.updater.automaticallyChecksForUpdates = automaticallyChecksForUpdates
-        }
-    }
+    @Published private(set) var automaticallyChecksForUpdates: Bool
 
     private let updaterController: SPUStandardUpdaterController
     private let delegate: UpdaterDelegate
@@ -71,9 +51,7 @@ final class AppUpdater: ObservableObject {
             }
         }
 
-        // `automaticallyChecksForUpdates` is KVO-compliant and can change from
-        // outside this class (user defaults, a zeroed check interval), so mirror
-        // it back rather than letting the toggle drift from the truth.
+        // Can also change via user defaults; keep the toggle in sync.
         automaticChecksObservation = updaterController.updater.observe(
             \.automaticallyChecksForUpdates,
             options: [.new]
@@ -84,41 +62,37 @@ final class AppUpdater: ObservableObject {
             }
         }
 
-        // Without this, a failed background check is completely silent: Sparkle
-        // suppresses scheduled-check errors from the UI, so nothing would ever
-        // populate `lastError` and a user could sit on a broken feed forever.
-        delegate.onUpdateCycleFinished = { [weak self] error in
+        // Sparkle hides scheduled-check errors from the UI; surface them here.
+        delegate.onUpdateCycleFinished = { [weak self] check, error in
+            guard !AppUpdater.isOfflineBackgroundCheck(check, error: error) else { return }
             Task { @MainActor [weak self] in
-                self?.recordUpdateCycleResult(error)
+                self?.lastError = AppUpdater.describe(error)
             }
         }
 
         guard isConfigured else { return }
 
-        // Not re-read afterwards: startUpdater() does not touch this property,
-        // and assigning again would only re-enter didSet.
         updaterController.startUpdater()
     }
 
     func checkForUpdates() {
-        // Callers gate on `isConfigured`; with no feed there is nothing to check.
         guard isConfigured else { return }
 
         updaterController.checkForUpdates(nil)
     }
 
-    /// Maps the outcome of an update cycle onto `lastError`. Not directly
-    /// covered: constructing an `AppUpdater` spins up a live
-    /// `SPUStandardUpdaterController`. The mapping itself is `describe`, which
-    /// is pure and tested.
-    func recordUpdateCycleResult(_ error: Error?) {
-        lastError = Self.describe(error)
+    func setAutomaticallyChecksForUpdates(_ enabled: Bool) {
+        guard isConfigured else { return }
+
+        // Disabling stops cycles, so nothing else would clear a stale error.
+        if !enabled {
+            lastError = nil
+        }
+        automaticallyChecksForUpdates = enabled
+        updaterController.updater.automaticallyChecksForUpdates = enabled
     }
 
-    /// The outcomes Sparkle itself declines to log or surface. "No update
-    /// found" is the obvious one; the other two are routine too — the user
-    /// dismissed the admin prompt, or the automatic path needed admin rights it
-    /// could not ask for right now and deferred. None is a failure to report.
+    /// Outcomes Sparkle itself treats as routine: no update, prompt dismissed, install deferred.
     nonisolated private static let benignCodes: Set<Int> = [
         Int(SUError.noUpdateError.rawValue),                    // 1001
         Int(SUError.installationCanceledError.rawValue),        // 4007
@@ -133,24 +107,39 @@ final class AppUpdater: ObservableObject {
             return nil
         }
 
-        // Sparkle builds many of its errors with `userInfo: nil`, and Foundation
-        // then synthesises "The operation couldn't be completed. (SUSparkleError
-        // Domain error 4010.)" — debug text, never empty, and not something to
-        // show a user. Only trust a description the error actually carries.
-        guard let carried = nsError.userInfo[NSLocalizedDescriptionKey] as? String else {
+        // Sparkle often leaves userInfo nil, and Foundation's synthesised
+        // description is debug text ("SUSparkleErrorDomain error 4010").
+        guard let message = (nsError.userInfo[NSLocalizedDescriptionKey] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !message.isEmpty else {
             return "Update check failed"
         }
 
-        let trimmed = carried.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "Update check failed" }
-
-        // For the errors a DMG user actually hits — running from the mounted
-        // image, or translocated — the description names the problem and the
-        // recovery suggestion is the half that says what to do about it.
+        // Disk-image/translocation errors put the fix in the recovery suggestion.
         let recovery = (nsError.userInfo[NSLocalizedRecoverySuggestionErrorKey] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let recovery, !recovery.isEmpty else { return trimmed }
+        guard let recovery, !recovery.isEmpty else { return message }
 
-        return "\(trimmed) \(recovery)"
+        return "\(message) \(recovery)"
+    }
+
+    nonisolated private static let offlineCodes: Set<Int> = [
+        NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut,
+        NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed,
+        NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed
+    ]
+
+    /// A scheduled check that couldn't reach the network (e.g. a laptop waking
+    /// before Wi-Fi reconnects) says nothing about the feed.
+    nonisolated static func isOfflineBackgroundCheck(_ check: SPUUpdateCheck, error: Error?) -> Bool {
+        guard check == .updatesInBackground else { return false }
+
+        // Sparkle nests the URL error inside one or more of its own download errors.
+        var current = error as NSError?
+        while let nsError = current {
+            if nsError.domain == NSURLErrorDomain { return offlineCodes.contains(nsError.code) }
+            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
     }
 }
